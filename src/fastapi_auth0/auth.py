@@ -4,6 +4,7 @@ import os
 from typing import Optional, Dict, List, Type
 import urllib.parse
 import urllib.request
+from functools import lru_cache
 
 from jose import jwt  # type: ignore
 from fastapi import HTTPException, Depends, Request
@@ -88,8 +89,9 @@ class Auth0:
         self.auth0_user_model = auth0user_model
 
         self.algorithms = ['RS256']
-        r = urllib.request.urlopen(f'https://{domain}/.well-known/jwks.json')
-        self.jwks: JwksDict = json.loads(r.read())
+        
+        # Store JWKS URL for later retrieval
+        self.jwks_url = f'https://{domain}/.well-known/jwks.json'
 
         authorization_url_qs = urllib.parse.urlencode({'audience': api_audience})
         authorization_url = f'https://{domain}/authorize?{authorization_url_qs}'
@@ -105,6 +107,19 @@ class Auth0:
         self.oidc_scheme = OpenIdConnect(openIdConnectUrl=f'https://{domain}/.well-known/openid-configuration')
 
 
+    @lru_cache(maxsize=1)  # Cache the JWKS to avoid fetching it multiple times
+    def get_jwks(self):
+        try:
+            r = urllib.request.urlopen(self.jwks_url)
+            return json.loads(r.read())
+        except (urllib.error.URLError) as e:
+            # Handle network errors gracefully
+            raise HTTPException(status_code=503, detail="Unable to reach Auth0 JWKS endpoint. Please check your internet connection.") from e
+        except Exception as e:
+            # Handle other unexpected errors
+            raise HTTPException(status_code=500, detail="An unexpected error occurred while fetching JWKS.") from e
+
+     
     async def get_user(self,
         security_scopes: SecurityScopes,
         creds: Optional[HTTPAuthorizationCredentials] = Depends(Auth0HTTPBearer(auto_error=False)),
@@ -117,6 +132,8 @@ class Auth0:
         Not to be called directly, but to be placed within a Depends() or Security() wrapper.
         Example: def path_op_func(user: Auth0User = Security(auth.get_user)).
         """
+        self.jwks : JwksDict = self.get_jwks()
+        
         if creds is None:
             if self.auto_error:
                 # See HTTPBearer from FastAPI:
